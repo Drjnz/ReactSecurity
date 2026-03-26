@@ -76,8 +76,8 @@ app.post(
       const query = `INSERT INTO users (email, password, role) VALUES (?, ?, 'user')`;
       db.run(query, [email, hashedPassword], function (err) {
         if (err) {
-          console.error("Erreur BDD /register :", err.message);  
-          return res.status(500).json(INTERNAL_ERROR);           
+          console.error("Erreur BDD /register :", err.message);
+          return res.status(500).json(INTERNAL_ERROR);
         }
         res.status(201).json({ message: "Utilisateur créé avec succès" });
       });
@@ -96,8 +96,8 @@ app.post('/api/auth/login', loginLimiter, (req, res) => {
 
   db.get(query, [email], async (err, user) => {
     if (err) {
-      console.error("Erreur BDD /login :", err.message); 
-      return res.status(500).json(INTERNAL_ERROR);        
+      console.error("Erreur BDD /login :", err.message);
+      return res.status(500).json(INTERNAL_ERROR);
     }
 
     if (!user) {
@@ -203,14 +203,14 @@ app.get("/api/notes", authMiddleware, (req, res) => {
 
   db.all(query, params, (err, notes) => {
     if (err) {
-      console.error("Erreur BDD GET /notes :", err.message);  
-      return res.status(500).json(INTERNAL_ERROR);             
+      console.error("Erreur BDD GET /notes :", err.message);
+      return res.status(500).json(INTERNAL_ERROR);
     }
     res.json(notes);
   });
 });
 
-//  Créer une note
+// Créer une note
 
 app.post("/api/notes", authMiddleware, (req, res) => {
   const { content } = req.body;
@@ -231,8 +231,8 @@ app.post("/api/notes", authMiddleware, (req, res) => {
 
   db.run(query, [cleanContent, userId], function (err) {
     if (err) {
-      console.error("Erreur BDD POST /notes :", err.message); // 
-      return res.status(500).json(INTERNAL_ERROR);             
+      console.error("Erreur BDD POST /notes :", err.message);
+      return res.status(500).json(INTERNAL_ERROR);
     }
     res.status(201).json({
       message: "Note ajoutée avec succès",
@@ -241,8 +241,7 @@ app.post("/api/notes", authMiddleware, (req, res) => {
   });
 });
 
-
-//  Supprimer une note
+// Supprimer une note
 
 app.delete("/api/notes/:id", authMiddleware, (req, res) => {
   const noteId = req.params.id;
@@ -254,8 +253,8 @@ app.delete("/api/notes/:id", authMiddleware, (req, res) => {
 
   db.run(query, [noteId, userId], function (err) {
     if (err) {
-      console.error("Erreur BDD DELETE /notes :", err.message); 
-      return res.status(500).json(INTERNAL_ERROR);               
+      console.error("Erreur BDD DELETE /notes :", err.message);
+      return res.status(500).json(INTERNAL_ERROR);
     }
     if (this.changes === 0) {
       return res.status(403).json({ error: "Suppression refusée : note introuvable ou non autorisée" });
@@ -263,7 +262,8 @@ app.delete("/api/notes/:id", authMiddleware, (req, res) => {
     res.status(200).json({ message: "Note supprimée avec succès" });
   });
 });
-// module 3: le droit à l'oubli : suppression de son compte par l'utilisateur
+
+// Module 3 : le droit à l'oubli — suppression de son compte par l'utilisateur
 
 app.delete("/api/users/me", authMiddleware, (req, res) => {
   const userId = req.user.id;
@@ -280,21 +280,118 @@ app.delete("/api/users/me", authMiddleware, (req, res) => {
   });
 });
 
-//  Liste des utilisateurs (admin)
+// Mission 1 : L'Édition de Profil
+// PUT /api/users/:id — mise à jour email et/ou bio
 
+app.put('/api/users/:id',authMiddleware,[body('email').optional().isEmail().withMessage("L'email fourni n'est pas valide."),],(req, res) => {
+    // Validation express-validator
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const targetId = parseInt(req.params.id, 10);
+
+    // Un utilisateur ne peut modifier que son propre profil
+    if (req.user.id !== targetId) {
+      return res.status(403).json({
+        error: "Accès refusé : vous ne pouvez modifier que votre propre profil."
+      });
+    }
+
+    const { email, bio } = req.body;
+
+    // Nettoyage de la bio avec sanitize-html (texte riche accepté mais sécurisé)
+    const cleanBio = bio !== undefined
+      ? sanitizeHtml(bio, {
+          allowedTags: ['b', 'i', 'em', 'strong', 'a', 'p', 'br', 'ul', 'li'],
+          allowedAttributes: { a: ['href'] },
+        })
+      : undefined;
+
+    // Construction dynamique de la requête UPDATE
+    const fields = [];
+    const values = [];
+
+    if (email !== undefined) {
+      fields.push('email = ?');
+      values.push(email);
+    }
+    if (cleanBio !== undefined) {
+      fields.push('bio = ?');
+      values.push(cleanBio);
+    }
+
+    if (fields.length === 0) {
+      return res.status(400).json({ error: "Aucun champ à mettre à jour." });
+    }
+
+    values.push(targetId);
+
+    db.run(
+      `UPDATE users SET ${fields.join(', ')} WHERE id = ?`,
+      values,
+      function (err) {
+        if (err) {
+          console.error("Erreur BDD PUT /users/:id :", err.message);
+          return res.status(500).json(INTERNAL_ERROR);
+        }
+        if (this.changes === 0) {
+          return res.status(404).json({ error: "Utilisateur introuvable." });
+        }
+        res.json({ message: "Profil mis à jour avec succès." });
+      }
+    );
+  }
+);
+// ─────────────────────────────────────────────
+// Mission 2 : Le Verrouillage du Back-Office
+// GET /api/admin/users — liste tous les utilisateurs
+// Protégée : token JWT valide + rôle admin requis
+// CORS strict : accessible uniquement depuis le front React
+// ─────────────────────────────────────────────
+app.get('/api/admin/users', authMiddleware, isAdmin, (req, res) => {
+  const query = "SELECT id, email, role, bio FROM users ORDER BY id ASC";
+
+  db.all(query, [], (err, users) => {
+    if (err) {
+      console.error("Erreur BDD GET /api/admin/users :", err.message);
+      return res.status(500).json(INTERNAL_ERROR);
+    }
+    res.json({ users });
+  });
+});
+
+// Mission 2 : Le Verrouillage du Back-Office
+// GET /api/admin/users — liste tous les utilisateurs
+// Protégée : token JWT valide + rôle admin requis
+// CORS strict : accessible uniquement depuis le front React
+
+app.get('/api/admin/users', authMiddleware, isAdmin, (req, res) => {
+  const query = "SELECT id, email, role, bio FROM users ORDER BY id ASC";
+
+  db.all(query, [], (err, users) => {
+    if (err) {
+      console.error("Erreur BDD GET /api/admin/users :", err.message);
+      return res.status(500).json(INTERNAL_ERROR);
+    }
+    res.json({ users });
+  });
+});
+
+// Liste des utilisateurs (admin)
 app.get('/api/users', authMiddleware, isAdmin, (req, res) => {
   const query = "SELECT id, email, role FROM users";
   db.all(query, [], (err, users) => {
     if (err) {
-      console.error("Erreur BDD GET /users :", err.message); 
-      return res.status(500).json(INTERNAL_ERROR);            
+      console.error("Erreur BDD GET /users :", err.message);
+      return res.status(500).json(INTERNAL_ERROR);
     }
     res.json(users);
   });
 });
 
-//MODULE 1 : Edition du profil (admin & user)
-app.put('/api/users/:id', authMiddleware, isAdmin, (req, res) => {
+/*app.put('/api/users/:id/role', authMiddleware, isAdmin, (req, res) => {
   const userId = req.params.id;
   const { role } = req.body;
 
@@ -311,7 +408,7 @@ app.put('/api/users/:id', authMiddleware, isAdmin, (req, res) => {
     res.json({ message: "Rôle mis à jour avec succès" });
   });
 });
-
+*/
 // Démarrage du serveur
 
 const PORT = process.env.PORT || 3000;

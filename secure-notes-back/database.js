@@ -5,12 +5,13 @@ const db = new sqlite3.Database('./securenotes.db');
 async function initDb() {
   db.serialize(async () => {
 
-    // ── Création des tables ──────────────────────────────────
+    //  Création des tables des différentes tables de la Base de données ──
     db.run(`CREATE TABLE IF NOT EXISTS users (
       id              INTEGER PRIMARY KEY AUTOINCREMENT,
       email           TEXT UNIQUE,
       password        TEXT,
       role            TEXT DEFAULT 'user',
+      bio            TEXT,
       login_attempts  INTEGER DEFAULT 0,
       lock_until      INTEGER DEFAULT NULL
     )`);
@@ -25,13 +26,13 @@ async function initDb() {
 
     // ── Vérification : on n'insère les données qu'une seule fois ──
     db.get(`SELECT COUNT(*) as count FROM users`, async (err, row) => {
-      if (err || row.count > 0) return; // Déjà initialisé → on ne touche à rien
+      if (err || row.count > 0) return;
 
       const hashAdmin = await bcrypt.hash('adminpass', 10);
       const hashUser  = await bcrypt.hash('userpass', 10);
       const hashLucas = await bcrypt.hash('lucaspass', 10);
 
-      // ── Utilisateurs ────────────────────────────────────────
+      // données de la table users (admin & utilisateurs)
       db.run(
         `INSERT INTO users (email, password, role) VALUES (?, ?, ?)`,
         ['admin@example.com', hashAdmin, 'admin']
@@ -45,7 +46,7 @@ async function initDb() {
         ['lucas@example.com', hashLucas, 'user']
       );
 
-      // ── Notes de démo ────────────────────────────────────────
+      // ── Notes de démo 
       db.run(
         `INSERT INTO notes (title, content, user_id) VALUES (?, ?, ?)`,
         ['Ma première note', 'Voici le texte de ma note.', 1]
