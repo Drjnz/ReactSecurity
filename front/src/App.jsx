@@ -8,6 +8,7 @@ import Navbar from './components/Navbar';
 function App() {
   return (
     <Router>
+      <Navbar />
       <div style={{ fontFamily: 'Arial', padding: '20px' }}>
         <h1>📝 SecureNotes (Front-end)</h1>
         <Routes>
