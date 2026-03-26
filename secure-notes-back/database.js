@@ -33,6 +33,7 @@ async function initDb() {
 
       if (!row) {
         console.log("Aucun admin trouvé, création d'un admin par défaut…");
+        
         // hash du mot de passe admin 
         const hashAdmin = await bcrypt.hash('adminpass', 10);
 
@@ -41,11 +42,11 @@ async function initDb() {
           ['admin@example.com', hashAdmin],
           (err) => {
             if (err) console.error("Erreur création admin :", err);
-            else console.log("Admin créé : admin@example.com / adminpass");
+            else console.log("Admin créé");
           }
         );
       } else {
-        console.log("Admin déjà présent :", row.email);
+        console.log("Admin déjà présent ");
       }
     });
 
