@@ -1,4 +1,5 @@
 require('dotenv').config();
+const fs = require('fs');
 const jwt = require('jsonwebtoken');
 const express = require('express');
 const cors = require('cors');
@@ -6,83 +7,210 @@ const bcrypt = require('bcrypt');
 const rateLimit = require("express-rate-limit");
 const helmet = require('helmet');
 const sanitizeHtml = require('sanitize-html');
+const { body, validationResult } = require('express-validator');
 
 const db = require('./database');
 const authMiddleware = require('./middleware/auth');
-
-const saltRounds = 10;
-const app = express();
 const isAdmin = require('./middleware/isAdmin');
 
 
+// MODULE 4 — Logging : utilitaire de traçabilité
+
+function logSecurityEvent(message) {
+  const line = `${new Date().toISOString()} — ${message}\n`;
+  fs.appendFile('security.log', line, err => {
+    if (err) console.error('Erreur écriture log :', err);
+  });
+}
+
+
+// MODULE 2 — Message d'erreur générique (aucune fuite technique)
+
+const INTERNAL_ERROR = { error: "Une erreur interne du serveur est survenue." };
+
+const saltRounds = 10;
+const app = express();
+
+// Sécurité globale
+
 app.use(helmet());
-app.use(cors());
+
+// CORS strict : seul le front React est autorisé
+app.use(cors({
+  origin: process.env.FRONTEND_URL || 'http://localhost:5173',
+  methods: ['GET', 'POST', 'PUT', 'DELETE']
+}));
+
 app.use(express.json());
 
-const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5 });
-app.post('/api/auth/register', async (req, res) => {
+// Rate limiting sur les routes d'authentification
+
+const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 5 });
+
+// ROUTE : Inscription
+
+app.post(
+  '/api/auth/register',
+  loginLimiter,
+  [
+    body('email')
+      .isEmail()
+      .withMessage("Format d'email invalide"),
+    body('password')
+      .isLength({ min: 8 })
+      .withMessage('Le mot de passe doit faire au moins 8 caractères')
+  ],
+  async (req, res) => {
+
+    // MODULE 1 — Validation
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
     const { email, password } = req.body;
     console.log("Tentative d'inscription pour :", email);
 
     try {
-        const hashedPassword = await bcrypt.hash(password, saltRounds);
-        const query = `INSERT INTO users (email, password, role) VALUES (?, ?, 'user')`;
-        db.run(query, [email, hashedPassword], function(err) {
-            if (err) {
-                console.error("Erreur base de données :", err.message);
-                return res.status(500).json({ error: "Erreur lors de l'inscription" });
-            }
-            res.status(201).json({ message: "Utilisateur créé avec succès" });
-        });
-    } catch (error) {
-        console.error("Erreur lors du hachage :", error);
-        res.status(500).json({ error: "Erreur serveur lors de la création du compte" });
-    }
-});
-
-app.post('/api/auth/login', limiter, (req, res) => {
-    const { email, password } = req.body;
-    const query = `SELECT * FROM users WHERE email = ?`;
-
-    db.get(query, [email], async (err, user) => {
-        if (err) return res.status(500).json({ error: "Erreur serveur" });
-        if (!user) return res.status(401).json({ error: "Identifiants incorrects" });
-
-        try {
-            const match = await bcrypt.compare(password, user.password);
-            if (match) {
-                const payload = { id: user.id, email: user.email, role: user.role };
-                const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: '1h' });
-                delete user.password;
-                res.json({ user, token });
-            } else {
-                res.status(401).json({ error: "Identifiants incorrects" });
-            }
-        } catch (error) {
-            console.error("Erreur lors de la comparaison :", error);
-            res.status(500).json({ error: "Erreur serveur" });
+      const hashedPassword = await bcrypt.hash(password, saltRounds);
+      const query = `INSERT INTO users (email, password, role) VALUES (?, ?, 'user')`;
+      db.run(query, [email, hashedPassword], function (err) {
+        if (err) {
+          console.error("Erreur BDD /register :", err.message);  
+          return res.status(500).json(INTERNAL_ERROR);           
         }
-    });
+        res.status(201).json({ message: "Utilisateur créé avec succès" });
+      });
+    } catch (error) {
+      console.error("Erreur hachage /register :", error);
+      res.status(500).json(INTERNAL_ERROR);
+    }
+  }
+);
+
+// ROUTE : Connexion
+
+app.post('/api/auth/login', loginLimiter, (req, res) => {
+  const { email, password } = req.body;
+  const query = `SELECT * FROM users WHERE email = ?`;
+
+  db.get(query, [email], async (err, user) => {
+    if (err) {
+      console.error("Erreur BDD /login :", err.message); 
+      return res.status(500).json(INTERNAL_ERROR);        
+    }
+
+    if (!user) {
+      return res.status(401).json({ error: "Identifiants incorrects" });
+    }
+
+    // MODULE 3 — Vérification du verrou temporel
+
+    if (user.lock_until && Date.now() < user.lock_until) {
+      const remaining = Math.ceil((user.lock_until - Date.now()) / 1000 / 60);
+      logSecurityEvent(`SOFT_LOCK_REJECTED email=${user.email} remaining=${remaining}min`);
+      return res.status(423).json({
+        error: `Compte temporairement verrouillé. Réessayez dans ${remaining} minute(s).`
+      });
+    }
+
+    try {
+      const match = await bcrypt.compare(password, user.password);
+
+      if (!match) {
+        const attempts = (user.login_attempts || 0) + 1;
+
+        if (attempts >= 5) {
+          const lockUntil = Date.now() + 15 * 60 * 1000;
+          db.run(
+            `UPDATE users SET login_attempts = 0, lock_until = ? WHERE id = ?`,
+            [lockUntil, user.id],
+            (updateErr) => {
+              if (updateErr) {
+                console.error("Erreur BDD lock :", updateErr.message);
+                return res.status(500).json(INTERNAL_ERROR);
+              }
+              logSecurityEvent(`ACCOUNT_LOCKED email=${user.email} until=${new Date(lockUntil).toISOString()}`);
+              return res.status(423).json({ error: "Compte verrouillé pendant 15 minutes." });
+            }
+          );
+          return;
+        }
+
+        db.run(
+          `UPDATE users SET login_attempts = ? WHERE id = ?`,
+          [attempts, user.id],
+          (updateErr) => {
+            if (updateErr) {
+              console.error("Erreur BDD attempts :", updateErr.message);
+              return res.status(500).json(INTERNAL_ERROR);
+            }
+            return res.status(401).json({ error: `Identifiants incorrects (${attempts}/5 tentatives).` });
+          }
+        );
+        return;
+      }
+
+      // Succès — remise à zéro des compteurs
+
+      db.run(
+        `UPDATE users SET login_attempts = 0, lock_until = NULL WHERE id = ?`,
+        [user.id],
+        (updateErr) => {
+          if (updateErr) {
+            console.error("Erreur BDD reset :", updateErr.message);
+            return res.status(500).json(INTERNAL_ERROR);
+          }
+
+          // MODULE 4 — Log connexion réussie
+          logSecurityEvent(`LOGIN_SUCCESS email=${user.email}`);
+
+          // JWT avec rôle inclus
+
+          const token = jwt.sign(
+            { id: user.id, email: user.email, role: user.role },
+            process.env.JWT_SECRET,
+            { expiresIn: '1h' }
+          );
+
+          delete user.password;
+          delete user.login_attempts;
+          delete user.lock_until;
+
+          res.json({
+            message: "Connexion réussie",
+            user: user,
+            token: token
+          });
+        }
+      );
+
+    } catch (error) {
+      console.error("Erreur bcrypt /login :", error);
+      res.status(500).json(INTERNAL_ERROR);
+    }
+  });
 });
+
+// ROUTE : Récupérer les notes
 
 app.get("/api/notes", authMiddleware, (req, res) => {
-    const isAdmin = req.user.role === 'admin';
-    const query = isAdmin ? "SELECT * FROM notes" : "SELECT * FROM notes WHERE user_id = ?";
-    const params = isAdmin ? [] : [req.user.id];
+  const isAdminUser = req.user.role === 'admin';
+  const query = isAdminUser
+    ? "SELECT * FROM notes"
+    : "SELECT * FROM notes WHERE user_id = ?";
+  const params = isAdminUser ? [] : [req.user.id];
 
-    db.all(query, params, (err, notes) => {
-        if (err) return res.status(500).json({ error: "Erreur serveur" });
-        res.json(notes);
-    });
+  db.all(query, params, (err, notes) => {
+    if (err) {
+      console.error("Erreur BDD GET /notes :", err.message);  
+      return res.status(500).json(INTERNAL_ERROR);             
+    }
+    res.json(notes);
+  });
 });
 
-app.get('/api/users', authMiddleware, isAdmin, (req, res) => {
-    const query = "SELECT id, email, role FROM users";
-    db.all(query, [], (err, users) => {
-        if (err) return res.status(500).json({ error: "Erreur serveur" });
-        res.json(users);
-    });
-});
+//  Créer une note
 
 app.post("/api/notes", authMiddleware, (req, res) => {
   const { content } = req.body;
@@ -91,39 +219,70 @@ app.post("/api/notes", authMiddleware, (req, res) => {
   if (!content) {
     return res.status(400).json({ error: "Le contenu de la note est obligatoire" });
   }
+
+  // Sanitisation XSS
+
+  const cleanContent = sanitizeHtml(content, {
+    allowedTags: [],
+    allowedAttributes: {}
+  });
+
   const query = "INSERT INTO notes (content, user_id) VALUES (?, ?)";
 
-  db.run(query, [content, userId], function (err) {
+  db.run(query, [cleanContent, userId], function (err) {
     if (err) {
-      console.error("Erreur lors de l'ajout de la note :", err);
-      return res.status(500).json({ error: "Erreur serveur" });
+      console.error("Erreur BDD POST /notes :", err.message); // Visible développeur ✓
+      return res.status(500).json(INTERNAL_ERROR);             
     }
     res.status(201).json({
       message: "Note ajoutée avec succès",
-      note: {
-        id: this.lastID,
-        content: content,
-        user_id: userId
-      }
+      note: { id: this.lastID, content: cleanContent, user_id: userId }
     });
   });
 });
 
+
+//  Supprimer une note
+
 app.delete("/api/notes/:id", authMiddleware, (req, res) => {
-    const noteId = req.params.id;
-    const userId = req.user.id;
-    const query = "DELETE FROM notes WHERE id = ? AND user_id = ?";
-    db.run(query, [noteId, userId], function(err) {
-        if (err) return res.status(500).json({ error: "Erreur serveur" });
+  const noteId = req.params.id;
+  const userId = req.user.id;
 
-        if (this.changes === 0) {
-            return res.status(404).json({ error: "Note introuvable ou accès refusé" });
-        }
+  // IDOR : double condition id + user_id
 
-        res.json({ message: "Note supprimée avec succès" });
-    });
+  const query = "DELETE FROM notes WHERE id = ? AND user_id = ?";
+
+  db.run(query, [noteId, userId], function (err) {
+    if (err) {
+      console.error("Erreur BDD DELETE /notes :", err.message); 
+      return res.status(500).json(INTERNAL_ERROR);               
+    }
+    if (this.changes === 0) {
+      return res.status(403).json({ error: "Suppression refusée : note introuvable ou non autorisée" });
+    }
+    res.status(200).json({ message: "Note supprimée avec succès" });
+  });
 });
-const PORT = 3000;
+
+
+
+//  Liste des utilisateurs (admin)
+
+app.get('/api/users', authMiddleware, isAdmin, (req, res) => {
+  const query = "SELECT id, email, role FROM users";
+  db.all(query, [], (err, users) => {
+    if (err) {
+      console.error("Erreur BDD GET /users :", err.message); 
+      return res.status(500).json(INTERNAL_ERROR);            
+    }
+    res.json(users);
+  });
+});
+
+
+// Démarrage du serveur
+
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`🚀 Serveur Back-end démarré sur http://localhost:${PORT}`);
+  console.log(`🚀 Serveur Back-end démarré sur http://localhost:${PORT}`);
 });
