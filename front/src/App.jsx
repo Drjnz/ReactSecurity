@@ -2,6 +2,8 @@ import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-d
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import Register from './pages/Register';
+import AdminDashboard from './components/AdminDashboard';
+import Navbar from './components/Navbar';
 
 function App() {
   return (
@@ -13,6 +15,7 @@ function App() {
           <Route path="/login" element={<Login />} />
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/register" element={<Register />} />
+          <Route path="/admin" element={<AdminDashboard/>} />
            
         </Routes>
       </div>

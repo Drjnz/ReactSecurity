@@ -5,13 +5,13 @@ const db = new sqlite3.Database('./securenotes.db');
 async function initDb() {
   db.serialize(async () => {
 
-    //  Création des tables des différentes tables de la Base de données ──
+    // Création des tables
     db.run(`CREATE TABLE IF NOT EXISTS users (
       id              INTEGER PRIMARY KEY AUTOINCREMENT,
       email           TEXT UNIQUE,
       password        TEXT,
       role            TEXT DEFAULT 'user',
-      bio            TEXT,
+      bio             TEXT,
       login_attempts  INTEGER DEFAULT 0,
       lock_until      INTEGER DEFAULT NULL
     )`);
@@ -24,38 +24,57 @@ async function initDb() {
       FOREIGN KEY (user_id) REFERENCES users(id)
     )`);
 
-    // ── Vérification : on n'insère les données qu'une seule fois ──
+    // Vérifier si l'admin existe déjà
+    db.get(`SELECT * FROM users WHERE email = 'admin@example.com'`, async (err, row) => {
+      if (err) {
+        console.error("Erreur SELECT admin :", err);
+        return;
+      }
+
+      if (!row) {
+        console.log("Aucun admin trouvé, création d'un admin par défaut…");
+        // hash du mot de passe admin 
+        const hashAdmin = await bcrypt.hash('adminpass', 10);
+
+        db.run(
+          `INSERT INTO users (email, password, role) VALUES (?, ?, 'admin')`,
+          ['admin@example.com', hashAdmin],
+          (err) => {
+            if (err) console.error("Erreur création admin :", err);
+            else console.log("Admin créé : admin@example.com / adminpass");
+          }
+        );
+      } else {
+        console.log("Admin déjà présent :", row.email);
+      }
+    });
+
+    // Vérifier si la base contient au moins 1 utilisateur
     db.get(`SELECT COUNT(*) as count FROM users`, async (err, row) => {
-      if (err || row.count > 0) return;
+      if (err) return;
 
-      const hashAdmin = await bcrypt.hash('adminpass', 10);
-      const hashUser  = await bcrypt.hash('userpass', 10);
-      const hashLucas = await bcrypt.hash('lucaspass', 10);
+      if (row.count <= 1) {
+        console.log("Base vide, insertion des utilisateurs de démo…");
+        // hash des mots de passe des utilisateurs
+        const hashUser = await bcrypt.hash('userpass', 10);
+        const hashJeremy = await bcrypt.hash('jeremypass', 10);
 
-      // données de la table users (admin & utilisateurs)
-      db.run(
-        `INSERT INTO users (email, password, role) VALUES (?, ?, ?)`,
-        ['admin@example.com', hashAdmin, 'admin']
-      );
-      db.run(
-        `INSERT INTO users (email, password, role) VALUES (?, ?, ?)`,
-        ['user@example.com', hashUser, 'user']   // ← rôle corrigé
-      );
-      db.run(
-        `INSERT INTO users (email, password, role) VALUES (?, ?, ?)`,
-        ['lucas@example.com', hashLucas, 'user']
-      );
+        db.run(
+          `INSERT INTO users (email, password, role) VALUES (?, ?, 'user')`,
+          ['user@example.com', hashUser]
+        );
+        db.run(
+          `INSERT INTO users (email, password, role) VALUES (?, ?, 'user')`,
+          ['jeremy@example.com', hashJeremy]
+        );
 
-      // ── Notes de démo 
-      db.run(
-        `INSERT INTO notes (title, content, user_id) VALUES (?, ?, ?)`,
-        ['Ma première note', 'Voici le texte de ma note.', 1]
-      );
+        db.run(
+          `INSERT INTO notes (title, content, user_id) VALUES (?, ?, ?)`,
+          ['Ma première note', 'Voici le texte de ma note.', 1]
+        );
 
-      console.log("✅ Base de données initialisée avec les comptes de démo.");
-      console.log("   admin@example.com  / adminpass  (admin)");
-      console.log("   user@example.com   / userpass   (user)");
-      console.log("   lucas@example.com  / lucaspass  (user)");
+        console.log(" Comptes de démo ajoutés.");
+      }
     });
   });
 }
